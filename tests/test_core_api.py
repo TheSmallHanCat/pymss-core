@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
+import yaml
 
 import pymss_core
 from pymss_core import AttrDict, load_config, unwrap_state_dict
@@ -34,6 +36,29 @@ training:
     assert isinstance(config, AttrDict)
     assert config.audio.chunk_size == 1024
     assert config.training.instruments == ["vocals"]
+
+
+@pytest.mark.parametrize("field", ["type", "model_type", "architecture"])
+@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize(("model_type", "kwargs"), [
+    ("bs_roformer", {
+        "dim": 8, "depth": 1, "heads": 2, "dim_head": 4, "use_pope": True,
+        "freqs_per_bands": [4, 5], "stft_n_fft": 16, "stft_hop_length": 4,
+        "stft_win_length": 16, "mask_estimator_depth": 1,
+    }),
+    ("apollo", {"sr": 16000, "win": 20, "feature_dim": 8, "layer": 1}),
+])
+def test_factory_preserves_architecture_metadata_without_passing_it_to_constructor(tmp_path, field, automatic, model_type, kwargs):
+    model_config = {**kwargs, field: model_type}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"model": model_config}), encoding="utf-8")
+    original = path.read_bytes()
+
+    model, config = pymss_core.get_model_from_config("auto" if automatic else model_type, path)
+
+    assert isinstance(model, torch.nn.Module)
+    assert config.model == model_config
+    assert path.read_bytes() == original
 
 
 def test_unwrap_state_dict_common_keys():

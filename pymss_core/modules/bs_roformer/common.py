@@ -4,6 +4,7 @@ from torch import nn
 from ..mlx_backend import MpsBackendMixin
 from .bands import BandSplit, MaskEstimator
 from .conformer import Conformer
+from .pope import PoPE
 from .transformer import RMSNorm, Transformer  # noqa: F401 (RMSNorm re-export is part of the package surface)
 DEFAULT_FREQS_PER_BANDS = (2,) * 24 + (4,) * 12 + (12,) * 8 + (24,) * 8 + (48,) * 8 + (128, 129)
 class SpectralContext(tuple):
@@ -45,10 +46,14 @@ def init_roformer_shared_bias(module, dim, heads, dim_head, use_shared_bias):
     module.linear_64_bias_0 = nn.Parameter(torch.ones(dim))
     return module.linear_62_bias_0, module.linear_64_bias_0
 def roformer_transformer_kwargs(*, dim, heads, dim_head, attn_dropout, ff_dropout, flash_attn, norm_output=None, shared_qkv_bias=None, shared_out_bias=None): return dict(dim=dim, heads=heads, dim_head=dim_head, attn_dropout=attn_dropout, ff_dropout=ff_dropout, flash_attn=flash_attn, **{k: v for k, v in (("norm_output", norm_output), ("shared_qkv_bias", shared_qkv_bias), ("shared_out_bias", shared_out_bias)) if v is not None})
-def init_roformer_layers(module, *, depth, time_transformer_depth, freq_transformer_depth, dim_head, transformer_kwargs):
-    # time/freq share one rotary table per axis pair (RNG order frozen for seed compatibility)
-    time_rotary, freq_rotary = RotaryEmbedding(dim=dim_head), RotaryEmbedding(dim=dim_head)
-    module.layers = nn.ModuleList([nn.ModuleList([ Transformer(depth=time_transformer_depth, rotary_embed=time_rotary, **transformer_kwargs), Transformer(depth=freq_transformer_depth, rotary_embed=freq_rotary, **transformer_kwargs)]) for _ in range(depth)])
+def init_roformer_layers(module, *, depth, time_transformer_depth, freq_transformer_depth, dim_head, transformer_kwargs, use_pope=False):
+    # Share one embedding per axis across layers (RNG order frozen for seed compatibility).
+    if use_pope:
+        time_embed, freq_embed = PoPE(dim_head, heads=transformer_kwargs["heads"]), PoPE(dim_head, heads=transformer_kwargs["heads"])
+    else:
+        time_embed, freq_embed = RotaryEmbedding(dim=dim_head), RotaryEmbedding(dim=dim_head)
+    embedding_key = "pope_embed" if use_pope else "rotary_embed"
+    module.layers = nn.ModuleList([nn.ModuleList([ Transformer(depth=time_transformer_depth, **{embedding_key: time_embed}, **transformer_kwargs), Transformer(depth=freq_transformer_depth, **{embedding_key: freq_embed}, **transformer_kwargs)]) for _ in range(depth)])
 def init_conformer_layers(module, *, depth, time_conformer_depth, freq_conformer_depth, dim_head, transformer_kwargs, ff_mult=4, conv_expansion_factor=2, conv_kernel_size=31):
     time_rotary, freq_rotary = RotaryEmbedding(dim=dim_head), RotaryEmbedding(dim=dim_head)
     ck = dict(ff_mult=ff_mult, conv_expansion_factor=conv_expansion_factor, conv_kernel_size=conv_kernel_size, **transformer_kwargs)

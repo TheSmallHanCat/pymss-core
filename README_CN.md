@@ -44,6 +44,9 @@ load_model_weights(model, "model.ckpt", model_type="bs_roformer", strict=True)
 model.eval()
 ```
 
+- 使用 `get_model_from_config("auto", "config.yaml")` 可根据 YAML 识别架构；`detect_model_type(config)` 为已加载的配置提供同一识别能力。未知或冲突的架构会抛出 `ModelTypeDetectionError`，手动指定模型类型可覆盖自动识别。
+- `bs_roformer` 也可加载 BS PolarFormer checkpoint，匹配的 YAML 配置需保留 `model.use_pope: true`
+
 ## 包边界
 
 包含：

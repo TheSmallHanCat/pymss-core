@@ -44,6 +44,9 @@ load_model_weights(model, "model.ckpt", model_type="bs_roformer", strict=True)
 model.eval()
 ```
 
+- Use `get_model_from_config("auto", "config.yaml")` to detect the architecture from YAML. `detect_model_type(config)` exposes the same detection for an already loaded configuration. Unknown or conflicting architectures raise `ModelTypeDetectionError` (a `RuntimeError` subclass); an explicit model type overrides detection.
+- `bs_roformer` also loads BS PolarFormer checkpoints when the matching YAML sets `model.use_pope: true`.
+
 ## Package Boundary
 
 Included:
