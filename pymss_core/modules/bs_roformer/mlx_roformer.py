@@ -250,6 +250,7 @@ def _mask_stft_repr_mbr(module, stft_repr, context, dtype):
     masks_summed = mx.zeros((context["batch"], len(module.mask_estimators), stft_repr.shape[1], stft_repr.shape[-2], 2), dtype=masks.dtype).at[:, :, freq_indices, :, :].add(masks)
     return _complex_from_ri(stft_repr[:, None]) * _complex_from_ri(masks_summed / mx.maximum(denom, 1e-8))
 def mlx_forward_roformer_mx(module, raw_audio, dtype=_COMPUTE_DTYPE):
+    if getattr(module, "use_pope", False): raise NotImplementedError("PoPE models require the PyTorch backend")
     if dtype not in (torch.float16, torch.float32): raise TypeError("MLX full RoFormer supports torch.float16 or torch.float32 compute dtype")
     import mlx.core as mx
     mx_dtype = mx.float16 if dtype == torch.float16 else mx.float32

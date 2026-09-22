@@ -26,6 +26,7 @@ def set_mps_attention_backend(module, backend=None, min_tokens=128, children=(),
     # one switch shared by Attention / Transformer / Conformer; mlx_transformer maps to torch at leaf level
     backend = (backend or default_mps_attention_backend()).lower()
     if backend not in _MPS_BACKENDS: raise ValueError("mps_attention_backend must be 'torch', 'mlx', 'mlx_attention', or 'mlx_transformer'")
+    if getattr(module, "use_pope", False): backend = "torch"
     module.mps_attention_backend = backend if keep_mlx_transformer else ("torch" if backend == "mlx_transformer" else backend)
     module.mps_mlx_min_tokens = 128 if min_tokens is None else int(min_tokens)
     for child in children: child.set_mps_attention_backend("torch" if backend == "mlx_transformer" else backend, module.mps_mlx_min_tokens)
@@ -33,12 +34,12 @@ def set_cuda_attention_backend(module, backend=None, children=()):
     module.cuda_attention_backend = normalize_cuda_attention_backend(backend)
     if hasattr(module, "_disabled_cuda_attention_backends"): module._disabled_cuda_attention_backends.clear()
     for child in children: child.set_cuda_attention_backend(module.cuda_attention_backend)
-def _sdpa_with_backend(q, k, v, dropout_p, backend):
+def _sdpa_with_backend(q, k, v, dropout_p, backend, scale=None):
     kernel = getattr(getattr(torch.nn, "attention", None), "sdpa_kernel", None)
     enum = _sdpa_backend_enum(backend)
     if kernel is None or enum is None: raise RuntimeError(f"SDPA backend {backend!r} is not available in this PyTorch build")
     with kernel(enum):
-        return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+        return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, scale=scale)
 def _xformers_attention(q, k, v, dropout_p): import xformers.ops as xops; return xops.memory_efficient_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), p=dropout_p).transpose(1, 2)
 def apply_rotary_emb_fast(cos, sin, t):
     if t.dtype == torch.float32 or (t.is_cuda and t.dtype == torch.float16):
@@ -75,12 +76,14 @@ class FeedForward(Module):
     def __init__(self, dim, mult=4, dropout=0.0): super().__init__(); self.net = nn.Sequential(RMSNorm(dim), nn.Linear(dim, int(dim * mult)), nn.GELU(), nn.Dropout(dropout), nn.Linear(int(dim * mult), dim), nn.Dropout(dropout))
     def forward(self, x): return self.net(x)
 class Attention(Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, shared_qkv_bias=None, shared_out_bias=None, rotary_embed=None, flash=True):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, shared_qkv_bias=None, shared_out_bias=None, rotary_embed=None, flash=True, pope_embed=None):
         super().__init__()
+        if rotary_embed is not None and pope_embed is not None: raise ValueError("Rotary and PoPE embeddings are mutually exclusive")
+        self.pope_embed, self.use_pope = pope_embed, pope_embed is not None
         self.heads, self.flash, self.dropout, self.rotary_embed = heads, flash, dropout, rotary_embed
         self.mps_attention_backend, self.mps_mlx_min_tokens = default_mps_attention_backend(), 128
         self.cuda_attention_backend, self._disabled_cuda_attention_backends = default_cuda_attention_backend(), set()
-        self.attend, self.norm = Attend(flash=False, dropout=dropout), RMSNorm(dim)
+        self.attend, self.norm = Attend(flash=False, dropout=dropout, scale=dim_head ** -0.5 if self.use_pope else None), RMSNorm(dim)
         self.to_qkv = nn.Linear(dim, heads * dim_head * 3, bias=(shared_qkv_bias is not None))
         if shared_qkv_bias is not None: self.to_qkv.bias = shared_qkv_bias
         self.to_gates = nn.Linear(dim, heads)
@@ -102,28 +105,30 @@ class Attention(Module):
         return self.attend(q, k, v)
     def _cuda_or_default_attention(self, q, k, v):
         dropout_p = self.dropout if self.training else 0.0
+        scale = self.attend.scale
         backend = self.cuda_attention_backend
-        if not q.is_cuda or backend == "default": return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+        if not q.is_cuda or backend == "default": return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, scale=scale)
         if backend == "auto":
             for candidate in ("cudnn", "efficient"):
                 if candidate in self._disabled_cuda_attention_backends: continue
                 try:
-                    return _sdpa_with_backend(q, k, v, dropout_p, candidate)
+                    return _sdpa_with_backend(q, k, v, dropout_p, candidate, scale=scale)
                 except torch.cuda.OutOfMemoryError:
                     raise
                 except Exception as exc:
                     self._pymss_cuda_attention_backend_error = f"{candidate}: {exc!r}"
                     self._disabled_cuda_attention_backends.add(candidate)
-            return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+            return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, scale=scale)
         try:
-            if backend == "xformers": return _xformers_attention(q, k, v, dropout_p)
-            return _sdpa_with_backend(q, k, v, dropout_p, backend)
+            # PoPE doubles Q/K width; compensate xformers' default scale to keep dim_head**-0.5.
+            if backend == "xformers": return _xformers_attention(q * (2 ** 0.5) if self.use_pope else q, k, v, dropout_p)
+            return _sdpa_with_backend(q, k, v, dropout_p, backend, scale=scale)
         except torch.cuda.OutOfMemoryError:
             raise
         except Exception as exc:
             self._pymss_cuda_attention_backend_error = f"{backend}: {exc!r}"
             self.cuda_attention_backend = "default"
-            return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+            return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, scale=scale)
     def forward(self, x):
         if self._use_mlx_attention_layer(x):
             try:
@@ -136,12 +141,16 @@ class Attention(Module):
         q, k, v = qkv_to_bnhd(self.to_qkv(x), self.heads)
         if self.rotary_embed is not None: q, k = rotate_qk_fast_bnhd(self.rotary_embed, q, k)
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        if self.pope_embed is not None: q, k = self.pope_embed(q, k)
         out = self._attention(q, k, v)
+        # Some MPS SDPA versions return the expanded Q/K width instead of V's width.
+        if self.use_pope and out.shape[-1] != v.shape[-1]: out = out[..., :v.shape[-1]]
         return self.to_out((out.transpose(1, 2) * self.to_gates(x).sigmoid().unsqueeze(-1)).flatten(start_dim=-2))
 class Transformer(Module):
-    def __init__(self, *, dim, depth, dim_head=64, heads=8, attn_dropout=0.0, ff_dropout=0.0, ff_mult=4, norm_output=True, rotary_embed=None, flash_attn=True, shared_qkv_bias=None, shared_out_bias=None):
+    def __init__(self, *, dim, depth, dim_head=64, heads=8, attn_dropout=0.0, ff_dropout=0.0, ff_mult=4, norm_output=True, rotary_embed=None, flash_attn=True, shared_qkv_bias=None, shared_out_bias=None, pope_embed=None):
         super().__init__()
-        self.layers = ModuleList([ModuleList([ Attention(dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout, shared_qkv_bias=shared_qkv_bias, shared_out_bias=shared_out_bias, rotary_embed=rotary_embed, flash=flash_attn), FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)]) for _ in range(depth)])
+        self.use_pope = pope_embed is not None
+        self.layers = ModuleList([ModuleList([ Attention(dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout, shared_qkv_bias=shared_qkv_bias, shared_out_bias=shared_out_bias, rotary_embed=rotary_embed, pope_embed=pope_embed, flash=flash_attn), FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)]) for _ in range(depth)])
         self.norm = RMSNorm(dim) if norm_output else nn.Identity()
         self.mps_attention_backend, self.mps_mlx_min_tokens, self.cuda_attention_backend = default_mps_attention_backend(), 128, default_cuda_attention_backend()
     def set_mps_attention_backend(self, backend=None, min_tokens=128): set_mps_attention_backend(self, backend, min_tokens, [attn for attn, _ in self.layers], keep_mlx_transformer=True)

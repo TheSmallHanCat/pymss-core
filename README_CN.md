@@ -44,6 +44,11 @@ load_model_weights(model, "model.ckpt", model_type="bs_roformer", strict=True)
 model.eval()
 ```
 
+`bs_roformer` 也可加载 BS PolarFormer checkpoint，匹配的 YAML 配置需保留
+`model.use_pope: true`，无需单独安装 PoPE 或 Triton 包。这类模型的 MLX
+后端请求会回退到 PyTorch，调用方应根据返回模型的 `mps_model_backend`
+决定权重放置的设备。
+
 ## 包边界
 
 包含：
