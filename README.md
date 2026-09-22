@@ -44,12 +44,8 @@ load_model_weights(model, "model.ckpt", model_type="bs_roformer", strict=True)
 model.eval()
 ```
 
-Use `get_model_from_config("auto", "config.yaml")` to detect the architecture from YAML. `detect_model_type(config)` exposes the same detection for an already loaded configuration. Unknown or conflicting architectures raise `ModelTypeDetectionError` (a `RuntimeError` subclass); an explicit model type overrides detection.
-
-`bs_roformer` also loads BS PolarFormer checkpoints when the matching YAML
-sets `model.use_pope: true`; no separate PoPE or Triton package is required.
-For these models, MLX backend requests fall back to PyTorch; use the returned
-model's `mps_model_backend` when deciding where to place weights.
+- Use `get_model_from_config("auto", "config.yaml")` to detect the architecture from YAML. `detect_model_type(config)` exposes the same detection for an already loaded configuration. Unknown or conflicting architectures raise `ModelTypeDetectionError` (a `RuntimeError` subclass); an explicit model type overrides detection.
+- `bs_roformer` also loads BS PolarFormer checkpoints when the matching YAML sets `model.use_pope: true`.
 
 ## Package Boundary
 
