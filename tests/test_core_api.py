@@ -331,3 +331,23 @@ def test_vr_network_structures_remain_importable():
     assert CascadedASPPNet is not None
     assert CascadedNet is not None
     assert ModelParameters is not None
+
+
+def test_vr_51_low_band_networks_keep_full_lstm_capacity():
+    from pymss_core.modules.vocal_remover import CascadedNet
+
+    model = CascadedNet(n_fft=1344, nn_arch_size=56817, nout=4, nout_lstm=128)
+    stage1_low = model.stg1_low_band_net[0].lstm_dec2
+    stage1_high = model.stg1_high_band_net.lstm_dec2
+    stage2_low = model.stg2_low_band_net[0].lstm_dec2
+    stage2_high = model.stg2_high_band_net.lstm_dec2
+
+    for low_band in (stage1_low, stage2_low):
+        assert tuple(low_band.lstm.weight_ih_l0.shape) == (256, 168)
+        assert tuple(low_band.lstm.weight_hh_l0.shape) == (256, 64)
+        assert tuple(low_band.dense[0].weight.shape) == (168, 128)
+
+    for high_band in (stage1_high, stage2_high):
+        assert tuple(high_band.lstm.weight_ih_l0.shape) == (128, 168)
+        assert tuple(high_band.lstm.weight_hh_l0.shape) == (128, 32)
+        assert tuple(high_band.dense[0].weight.shape) == (168, 64)

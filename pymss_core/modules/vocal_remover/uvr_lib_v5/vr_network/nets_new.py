@@ -1,7 +1,10 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+
 from . import layers_new as layers
+
+
 class BaseNet(nn.Module):
     def __init__(self, nin, nout, nin_lstm, nout_lstm, dilations=((4, 2), (8, 4), (12, 6))):
         super().__init__()
@@ -26,11 +29,11 @@ class CascadedNet(nn.Module):
         self.max_bin, self.output_bin = n_fft // 2, n_fft // 2 + 1
         self.nin_lstm, self.offset = self.max_bin // 2, 64
         nout = 64 if nn_arch_size == 218409 else nout
-        bn = lambda nin, nout_, nl=nout_lstm // 2: BaseNet(nin, nout_, self.nin_lstm // 2, nl)
-        self.stg1_low_band_net = nn.Sequential(bn(2, nout // 2), layers.Conv2DBNActiv(nout // 2, nout // 4, 1, 1, 0))
-        self.stg1_high_band_net = bn(2, nout // 4)
-        self.stg2_low_band_net = nn.Sequential(bn(nout // 4 + 2, nout), layers.Conv2DBNActiv(nout, nout // 2, 1, 1, 0))
-        self.stg2_high_band_net = bn(nout // 4 + 2, nout // 2)
+        bn = lambda nin, nout_, nl: BaseNet(nin, nout_, self.nin_lstm // 2, nl)
+        self.stg1_low_band_net = nn.Sequential(bn(2, nout // 2, nout_lstm), layers.Conv2DBNActiv(nout // 2, nout // 4, 1, 1, 0))
+        self.stg1_high_band_net = bn(2, nout // 4, nout_lstm // 2)
+        self.stg2_low_band_net = nn.Sequential(bn(nout // 4 + 2, nout, nout_lstm), layers.Conv2DBNActiv(nout, nout // 2, 1, 1, 0))
+        self.stg2_high_band_net = bn(nout // 4 + 2, nout // 2, nout_lstm // 2)
         self.stg3_full_band_net = BaseNet(3 * nout // 4 + 2, nout, self.nin_lstm, nout_lstm)
         self.out = nn.Conv2d(nout, 2, 1, bias=False)
         self.aux_out = nn.Conv2d(3 * nout // 4, 2, 1, bias=False)
