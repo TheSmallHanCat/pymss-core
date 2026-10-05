@@ -1,7 +1,7 @@
 # MLX attention/FFN bridge: runs bs_roformer transformer blocks (rotary + gate)
 # on MPS by round-tripping torch<->mx. Rotary has a Metal-kernel fast path.
 import torch
-from ..mlx_backend import (compile_cached, torch_dtype,)
+from ..mlx_backend import (torch_dtype,)
 from ..mlx_backend import (gelu as _gelu,)
 from ..mlx_backend import (linear as _linear,)
 from ..mlx_backend import (mx_dtype as _mlx_dtype,)
@@ -91,46 +91,29 @@ def _attention_cache(module, dtype):
     }
     module._pymss_mlx_attention_cache = cache
     return cache
+_SDPA_QUERY_CHUNK = 512
+def _sdpa_chunked(q, k, v, scale):  # query-axis streaming: bitwise-identical, workspace bounded at chunk/T
+    import mlx.core as mx
+    T = q.shape[2]
+    if T <= _SDPA_QUERY_CHUNK: return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
+    return mx.concatenate([mx.fast.scaled_dot_product_attention(q[:, :, s : s + _SDPA_QUERY_CHUNK], k, v, scale=scale) for s in range(0, T, _SDPA_QUERY_CHUNK)], axis=2)
 def _mlx_attention(module, x, dtype):
     import mlx.core as mx
     dtype = _mlx_dtype(torch_dtype(dtype))
     cache = _attention_cache(module, dtype)
-    if module.rotary_embed is None and not getattr(module, "_pymss_mlx_disable_compiled_attention", False):
-        try:
-            return _mlx_attention_compiled(module, x, dtype, cache)
-        except Exception as exc:
-            module._pymss_mlx_disable_compiled_attention = True
-            module._pymss_mlx_compiled_attention_error = repr(exc)
-    x_norm = _rms_norm(x, cache["norm_gamma"])
-    qkv = _linear(x_norm, cache["qkv_weight"], cache["qkv_bias"])
+    # step-wise eval: each sub-step's workspace, not the whole layer's
+    x_norm = _rms_norm(x, cache["norm_gamma"]); mx.eval(x_norm)
+    qkv = _linear(x_norm, cache["qkv_weight"], cache["qkv_bias"]); mx.eval(qkv)
     b, n, _ = qkv.shape
     qkv = qkv.reshape(b, n, 3, module.heads, -1)
     q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
     if module.rotary_embed is not None: q, k = _apply_rotary(q, k, module.rotary_embed, dtype)
-    q, k, v = mx.swapaxes(q, 1, 2), mx.swapaxes(k, 1, 2), mx.swapaxes(v, 1, 2)
-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=q.shape[-1] ** -0.5)
+    q, k, v = mx.swapaxes(q, 1, 2), mx.swapaxes(k, 1, 2), mx.swapaxes(v, 1, 2); mx.eval(q, k, v)
+    out = _sdpa_chunked(q, k, v, scale=q.shape[-1] ** -0.5); mx.eval(out)
     out = mx.swapaxes(out, 1, 2)
     gates = _sigmoid(_linear(x_norm, cache["gate_weight"], cache["gate_bias"]))
-    return _linear((out * gates[..., None]).reshape(b, n, -1), cache["out_weight"], cache["out_bias"])
-def _mlx_attention_compiled(module, x, dtype, cache):
-    import mlx.core as mx
-    if module.rotary_embed is not None: raise TypeError("compiled MLX attention path does not include rotary embedding")
-    has_qkv_bias, has_gate_bias, has_out_bias = (cache["qkv_bias"] is not None, cache["gate_bias"] is not None, cache["out_bias"] is not None)
-    key = (tuple(x.shape), dtype, int(module.heads), has_qkv_bias, has_gate_bias, has_out_bias, cache["key"])
-    def attention_core(x_arg, norm_gamma, qkv_weight, qkv_bias, gate_weight, gate_bias, out_weight, out_bias):
-        x_norm = _rms_norm(x_arg, norm_gamma)
-        qkv = _linear(x_norm, qkv_weight, qkv_bias if has_qkv_bias else None)
-        b, n, _ = qkv.shape
-        qkv = qkv.reshape(b, n, 3, module.heads, -1)
-        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-        q, k, v = mx.swapaxes(q, 1, 2), mx.swapaxes(k, 1, 2), mx.swapaxes(v, 1, 2)
-        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=q.shape[-1] ** -0.5)
-        out = mx.swapaxes(out, 1, 2)
-        gates = _sigmoid(_linear(x_norm, gate_weight, gate_bias if has_gate_bias else None))
-        return _linear((out * gates[..., None]).reshape(b, n, -1), out_weight, out_bias if has_out_bias else None)
-    fn = compile_cached(module, "_pymss_mlx_compiled_attention_cache", key, attention_core)
-    dummy = mx.zeros((1,), dtype=_mlx_dtype(dtype))
-    return fn(x, cache["norm_gamma"], cache["qkv_weight"], cache["qkv_bias"] if has_qkv_bias else dummy, cache["gate_weight"], cache["gate_bias"] if has_gate_bias else dummy, cache["out_weight"], cache["out_bias"] if has_out_bias else dummy)
+    out = _linear((out * gates[..., None]).reshape(b, n, -1), cache["out_weight"], cache["out_bias"]); mx.eval(out)
+    return out
 def mlx_bridge_attention(module, x): x_mx = torch_mps_to_mlx(x).astype(_mlx_dtype(_COMPUTE_DTYPE)); out = _mlx_attention(module, x_mx, _COMPUTE_DTYPE); return mlx_to_torch_mps(out, x)
 def _feed_forward_cache(module, dtype):
     norm, linear_in, activation, _, linear_out, _ = module.net
@@ -143,27 +126,12 @@ def _feed_forward_cache(module, dtype):
     module._pymss_mlx_feed_forward_cache = cache
     return cache
 def _mlx_feed_forward(module, x, dtype):
-    cache = _feed_forward_cache(module, dtype)
-    if not getattr(module, "_pymss_mlx_disable_compiled_ffn", False):
-        try:
-            return _mlx_feed_forward_compiled(module, x, dtype, cache)
-        except Exception as exc:
-            module._pymss_mlx_disable_compiled_ffn = True
-            module._pymss_mlx_compiled_ffn_error = repr(exc)
-    return _mlx_feed_forward_fallback(x, cache)
-def _mlx_feed_forward_fallback(x, cache): x = _rms_norm(x, cache["norm_gamma"]); x = _gelu(_linear(x, cache["linear_in_weight"], cache["linear_in_bias"])); return _linear(x, cache["linear_out_weight"], cache["linear_out_bias"])
-def _mlx_feed_forward_compiled(module, x, dtype, cache):
     import mlx.core as mx
-    compiled_cache = getattr(module, "_pymss_mlx_compiled_feed_forward_cache", None)
-    if compiled_cache is None: module._pymss_mlx_compiled_feed_forward_cache = compiled_cache = {}
-    has_in_bias, has_out_bias = cache["linear_in_bias"] is not None, cache["linear_out_bias"] is not None
-    key = (tuple(x.shape), dtype, has_in_bias, has_out_bias, cache["key"])
-    fn = compiled_cache.get(key)
-    if fn is None:
-        def ffn_core(x_arg, norm_gamma, linear_in_weight, linear_in_bias, linear_out_weight, linear_out_bias): x_arg = _gelu(_linear(_rms_norm(x_arg, norm_gamma), linear_in_weight, linear_in_bias if has_in_bias else None)); return _linear(x_arg, linear_out_weight, linear_out_bias if has_out_bias else None)
-        fn = compiled_cache.setdefault(key, mx.compile(ffn_core))
-    dummy = mx.zeros((1,), dtype=_mlx_dtype(dtype))
-    return fn(x, cache["norm_gamma"], cache["linear_in_weight"], cache["linear_in_bias"] if has_in_bias else dummy, cache["linear_out_weight"], cache["linear_out_bias"] if has_out_bias else dummy)
+    cache = _feed_forward_cache(module, dtype)
+    y = _rms_norm(x, cache["norm_gamma"]); mx.eval(y)
+    y = _gelu(_linear(y, cache["linear_in_weight"], cache["linear_in_bias"])); mx.eval(y)
+    out = _linear(y, cache["linear_out_weight"], cache["linear_out_bias"]); mx.eval(out)
+    return out
 def _norm_gamma_cache(module, dtype):
     if isinstance(module, torch.nn.Identity): return None
     if not hasattr(module, "gamma"): raise TypeError("MLX transformer bridge only supports RMSNorm or Identity output norm")
