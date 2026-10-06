@@ -137,8 +137,11 @@ def _mask_estimator_cache(estimator, dtype):
     cache = {"key": key, "band_layers": tuple(band_layers)}
     estimator._pymss_mlx_full_mask_cache = cache
     return cache
-def segm_eval(*arrays):  # eval points inside the segm tree
-    import mlx.core as mx
+def segm_eval(*arrays):  # eval points inside the segm tree; no-op without mlx (mocked test paths)
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
     mx.eval(*arrays)
 def _mask_estimator(estimator, x, dtype):
     import mlx.core as mx

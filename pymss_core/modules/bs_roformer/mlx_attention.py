@@ -92,7 +92,7 @@ def _attention_cache(module, dtype):
     module._pymss_mlx_attention_cache = cache
     return cache
 _SDPA_QUERY_CHUNK = 512
-def _sdpa_chunked(q, k, v, scale):  # query-axis streaming: bitwise-identical, workspace bounded at chunk/T
+def _sdpa_chunked(q, k, v, scale):  # query-axis streaming: workspace bounded at chunk/T; tail chunks of 1-8 queries take the small-M kernel path (measured <=1 fp16 ulp vs fused)
     import mlx.core as mx
     T = q.shape[2]
     if T <= _SDPA_QUERY_CHUNK: return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
