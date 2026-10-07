@@ -38,6 +38,7 @@ class TFC_TDF_net(MpsBackendMixin, nn.Module):
         self.num_subbands = config.model.num_subbands
         dim_c, m = self.num_subbands * config.audio.num_channels * 2, config.model
         n, scale, l, c, g, bn = m.num_scales, m.scale, m.num_blocks_per_scale, m.num_channels, m.growth, m.bottleneck_factor
+        self.mdx_scale = scale  # exposed so load-time warmup can align dummy frame counts to the time-downsampling stack
         f = config.audio.dim_f // self.num_subbands
         self.first_conv = nn.Conv2d(dim_c, c, 1, 1, 0, bias=False)
         def encoder_block():
