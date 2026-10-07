@@ -1,4 +1,6 @@
 import copy
+import gc
+import weakref
 
 import pytest
 import torch
@@ -58,4 +60,41 @@ def test_cleanup_finishes_other_caches_before_reraising_a_hook_error():
         clear_model_runtime_caches(model)
     assert caught.value is failure
     assert not first._packed_cache and not second.cache and not second._pymss_cos_sin_cache
+    for key, value in weights.items(): torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("cache_name", [
+    "_pymss_mlx_full_param_cache", "_pymss_mlx_cos_sin_cache", "_pymss_mlx_attention_cache",
+    "_pymss_mlx_feed_forward_cache", "_pymss_mlx_norm_cache", "_pymss_mlx_full_band_split_cache",
+    "_pymss_mlx_full_mask_cache", "_pymss_mlx_full_mbr_cache",
+    "_pymss_mlx_compiled_attention_cache", "_pymss_mlx_compiled_feed_forward_cache",
+])
+@pytest.mark.parametrize("hook_failure", [False, True])
+def test_cleanup_releases_mlx_cache_references_even_when_a_hook_fails(cache_name, hook_failure):
+    failure = RuntimeError("Runtime cache cleanup failed")
+
+    class CachedModule(torch.nn.Linear):
+        def clear_runtime_cache(self):
+            if hook_failure: raise failure
+
+    model = torch.nn.Sequential(CachedModule(4, 4), torch.nn.Linear(4, 4))
+    weights = copy.deepcopy(model.state_dict())
+    model[0].cache = {"user": "keep"}
+    tensor = torch.ones(4)
+    reference = weakref.ref(tensor)
+    caches = [{"tensor": tensor}, {"tensor": tensor}]
+    for module, cache in zip(model, caches): setattr(module, cache_name, cache)
+    del tensor
+
+    if hook_failure:
+        with pytest.raises(RuntimeError) as caught: clear_model_runtime_caches(model)
+        assert caught.value is failure
+    else:
+        clear_model_runtime_caches(model)
+
+    gc.collect()
+    assert reference() is None
+    for module, cache in zip(model, caches):
+        assert getattr(module, cache_name) is cache and not cache
+    assert model[0].cache == {"user": "keep"}
     for key, value in weights.items(): torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)

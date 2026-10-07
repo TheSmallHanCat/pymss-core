@@ -3,7 +3,14 @@
 
 def clear_model_runtime_caches(model):
     """Release known inference caches and module-owned hooks without changing weights."""
-    cache_names = ("_stft_window_cache", "_pymss_cos_sin_cache", "_gamma_dtype_cache", "_group_cache", "_layer_group_cache", "_index_cache", "_packed_layer_group_cache", "_apollo_inference_cache", "_rotary_freq_cache", "_packed_cache")
+    cache_names = (
+        "_stft_window_cache", "_pymss_cos_sin_cache", "_gamma_dtype_cache", "_group_cache", "_layer_group_cache",
+        "_index_cache", "_packed_layer_group_cache", "_apollo_inference_cache", "_rotary_freq_cache", "_packed_cache",
+        "_pymss_mlx_full_param_cache", "_pymss_mlx_cos_sin_cache", "_pymss_mlx_attention_cache",
+        "_pymss_mlx_feed_forward_cache", "_pymss_mlx_norm_cache", "_pymss_mlx_full_band_split_cache",
+        "_pymss_mlx_full_mask_cache", "_pymss_mlx_full_mbr_cache",
+        "_pymss_mlx_compiled_attention_cache", "_pymss_mlx_compiled_feed_forward_cache",
+    )
     first_error = None
     for module in model.modules():
         clear = getattr(module, "clear_runtime_cache", None)
