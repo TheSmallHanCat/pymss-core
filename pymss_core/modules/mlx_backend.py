@@ -84,6 +84,22 @@ def periodic_hann_window(length, dtype):
     else: w = mx.hanning(length + 1)[:-1].astype(dtype)
     _HANN_MX_CACHE[key] = w
     return w
+_CACHE_LIMIT_DONE = False
+def _cache_limit():  # allocator cache is a monotonic ledger of dead-but-cached buffers; cap it so the peak tracks the live set, not the sum of all stages (PYMSS_MLX_CACHE_LIMIT_MB, -1=off)
+    global _CACHE_LIMIT_DONE
+    if _CACHE_LIMIT_DONE: return
+    _CACHE_LIMIT_DONE = True
+    try:
+        import os, mlx.core as mx
+        if (mb := int(os.environ.get("PYMSS_MLX_CACHE_LIMIT_MB", "1024"))) >= 0: mx.metal.set_cache_limit(mb * 1024 * 1024)
+    except Exception: pass
+def maybe_eval(*arrays):  # rolling eval: free each stage before the next builds; no-op when mlx is unavailable (cross-platform unit tests mock the forward path)
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
+    _cache_limit()
+    mx.eval(*arrays)
 def compile_cached(module, cache_name, key, fn):
     import mlx.core as mx
     cache = getattr(module, cache_name, None)
