@@ -2,11 +2,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from ..mlx_backend import MpsBackendMixin
+from pymss_core.runtime_cache import _clear_cache_dicts
 def _cached_inference_tensor(module, name, tensor, input, version):
     # fp16/bf16 CUDA inference: memoize casted weights; keyed on _version so in-place param updates invalidate
     if tensor is None or (tensor.device == input.device and tensor.dtype == input.dtype): return tensor
     key = (name, input.device, input.dtype, version)
-    cache = module.__dict__.setdefault("_apollo_inference_cache", {})
+    cache = module.__dict__.setdefault("_pymss_apollo_inference_cache", {})
     cached = cache.get(name)
     if cached is not None and cached[0] == key: return cached[1]
     casted = tensor.detach().to(device=input.device, dtype=input.dtype)
@@ -61,6 +62,7 @@ class Roformer(nn.Module):
         self.output = nn.Conv1d(self.hidden_size * self.num_head, self.input_size, 1, bias=False)
         self.MLP = nn.Sequential(RMSNorm(self.input_size), nn.Conv1d(self.input_size, self.input_size * 8, 1, bias=False), nn.SiLU())
         self.MLP_output = nn.Conv1d(self.input_size * 4, self.input_size, 1, bias=False)
+    def clear_runtime_cache(self): _clear_cache_dicts(self, "_rotary_freq_cache")
     def _calc_rotary_emb(self):
         freq = (1.0 / self.theta ** (torch.arange(0, self.hidden_size, 2)[: self.hidden_size // 2] / self.hidden_size)).reshape(1, -1)
         pos = torch.arange(self.window).reshape(-1, 1)
@@ -124,6 +126,7 @@ class Apollo(MpsBackendMixin, nn.Module):
         self.BN = nn.ModuleList([nn.Sequential(RMSNorm(width * 2 + 1), nn.Conv1d(width * 2 + 1, self.feature_dim, 1)) for width in self.band_width])
         self.net = nn.Sequential(*[BSNet(self.feature_dim) for _ in range(layer)])
         self.output = nn.ModuleList([nn.Sequential(RMSNorm(self.feature_dim), nn.Conv1d(self.feature_dim, width * 4, 1), nn.GLU(dim=1)) for width in self.band_width])
+    def clear_runtime_cache(self): _clear_cache_dicts(self, "_packed_cache")
     def mlx_forward_mx(self, raw_audio):
         from ..apollo_mlx import mlx_forward_apollo_mx
         return mlx_forward_apollo_mx(self, raw_audio, self.mps_model_compute_dtype)

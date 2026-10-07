@@ -2,6 +2,7 @@ from functools import partial
 import torch
 from torch import nn
 from ..mlx_backend import MpsBackendMixin
+from pymss_core.runtime_cache import _clear_cache_dicts
 from .bands import BandSplit, MaskEstimator
 from .conformer import Conformer
 from .pope import PoPE
@@ -72,6 +73,7 @@ def init_roformer_band_modules(module, *, dim, freqs_per_bands_with_complex, num
     module.band_split = BandSplit(dim=dim, dim_inputs=freqs_per_bands_with_complex)
     module.mask_estimators = nn.ModuleList([ mask_estimator_cls(dim=dim, dim_inputs=freqs_per_bands_with_complex, depth=mask_estimator_depth, mlp_expansion_factor=mlp_expansion_factor, **(mask_estimator_kwargs or {})) for _ in range(num_stems)])
 class RoformerRuntimeMixin(MpsBackendMixin):
+    def clear_runtime_cache(self): _clear_cache_dicts(self, "_stft_window_cache")
     def mlx_forward_mx(self, raw_audio): from .mlx_roformer import mlx_forward_roformer_mx; return mlx_forward_roformer_mx(self, raw_audio, self.mps_model_compute_dtype)
     def stft_window(self, device):
         key = (device.type, device.index, torch.float32)
