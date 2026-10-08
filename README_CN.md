@@ -33,6 +33,7 @@ pip install "pymss-core[mlx]"
 
 ```python
 from pymss_core import (
+    clear_model_runtime_caches,
     get_model_from_config,
     load_config,
     load_model_weights,
@@ -47,6 +48,16 @@ model.eval()
 - 使用 `get_model_from_config("auto", "config.yaml")` 可根据 YAML 识别架构；`detect_model_type(config)` 为已加载的配置提供同一识别能力。未知或冲突的架构会抛出 `ModelTypeDetectionError`，手动指定模型类型可覆盖自动识别。
 - `bs_roformer` 也可加载 BS PolarFormer checkpoint，匹配的 YAML 配置需保留 `model.use_pope: true`
 
+推理结束后，在释放模型前清理模型持有的派生缓存：
+
+```python
+clear_model_runtime_caches(model)
+```
+
+清理会保留模型参数和注册的 buffer，调用模块自身的 `clear_runtime_cache()` hook，并释放已知推理缓存的引用。如果某个 hook 失败，会继续清理其余模块，最后重新抛出首个错误。
+
+MLX 的 overlap-add 索引、Hann 窗口等进程级共享缓存，以及后端分配器缓存，需要单独管理，不属于此模型级清理函数的范围。
+
 ## 包边界
 
 包含：
@@ -56,6 +67,7 @@ model.eval()
 - 支持部分模型 forward 路径的可选 MLX backend 实现
 - 模型工厂：`get_model_from_config(model_type, config_path)`
 - 常见 MSS checkpoint 容器的加载与 state dict 解析
+- 模型持有的推理缓存清理
 - 构造模型结构所需的少量内部 DSP 数学函数
 - VR 网络结构和 `resources/vr_modelparams/*.json`
 
@@ -64,7 +76,7 @@ model.eval()
 - 音频文件解码/编码
 - 重采样、预处理和完整推理 DSP pipeline
 - tensor 级别的分块 demix runtime
-- 模型 catalog、别名、下载和缓存管理
+- 模型 catalog、别名、下载及模型文件缓存管理
 - CLI、server、WebUI 和接口 schema
 - dataset、augmentation、loss、metric 和 trainer 代码
 - 默认安装不会引入 MLX、Librosa、tqdm、Lightning、FastAPI、Uvicorn、

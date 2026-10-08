@@ -33,6 +33,7 @@ pip install "pymss-core[mlx]"
 
 ```python
 from pymss_core import (
+    clear_model_runtime_caches,
     get_model_from_config,
     load_config,
     load_model_weights,
@@ -47,6 +48,16 @@ model.eval()
 - Use `get_model_from_config("auto", "config.yaml")` to detect the architecture from YAML. `detect_model_type(config)` exposes the same detection for an already loaded configuration. Unknown or conflicting architectures raise `ModelTypeDetectionError` (a `RuntimeError` subclass); an explicit model type overrides detection.
 - `bs_roformer` also loads BS PolarFormer checkpoints when the matching YAML sets `model.use_pope: true`.
 
+After inference has finished, clear model-owned derived caches before releasing the model:
+
+```python
+clear_model_runtime_caches(model)
+```
+
+Cleanup preserves parameters and registered buffers. It calls module-owned `clear_runtime_cache()` hooks and releases known inference-cache references. If a hook fails, cleanup continues through the remaining modules before re-raising the first error.
+
+Process-wide shared MLX caches, including overlap-add indices and Hann windows, and backend allocator caches are managed separately. They are outside the scope of this model-level cleanup.
+
 ## Package Boundary
 
 Included:
@@ -56,6 +67,7 @@ Included:
 - Optional MLX backend implementations for supported model forward paths
 - Model factory: `get_model_from_config(model_type, config_path)`
 - Checkpoint helpers for common MSS checkpoint containers
+- Cleanup for model-owned inference caches
 - Small model-internal DSP math needed to construct model structures
 - VR network structures and VR model parameter JSON files
 
@@ -64,7 +76,7 @@ Excluded:
 - Audio file decoding/encoding
 - Resampling, preprocessing, and full inference DSP pipelines
 - Tensor-level chunked demixing runtime
-- Model catalog, aliases, downloads, and cache management
+- Model catalog, aliases, downloads, and model-file cache management
 - CLI, server, WebUI, and endpoint schemas
 - Dataset, augmentation, loss, metrics, and trainer code
 - Any default dependency on MLX, Librosa, tqdm, Lightning, FastAPI, Uvicorn,

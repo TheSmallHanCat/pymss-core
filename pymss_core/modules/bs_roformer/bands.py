@@ -2,6 +2,7 @@ import os
 from collections import defaultdict
 from itertools import accumulate, pairwise
 import torch
+from pymss_core.runtime_cache import _clear_cache_dicts
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import Module, ModuleList
@@ -30,6 +31,7 @@ def inference_tanh(x): return torch.tanh(x) if torch.is_grad_enabled() else x.ta
 def stack_linears(linears, device, dtype): weight = torch.stack([linear.weight.to(device=device, dtype=dtype) for linear in linears], dim=0); bias = None if linears[0].bias is None else torch.stack([linear.bias.to(device=device, dtype=dtype) for linear in linears]); return weight, bias
 class BandSplit(Module):
     def __init__(self, dim, dim_inputs: tuple[int, ...]): super().__init__(); self.dim_inputs, self._dim_offsets = dim_inputs, dim_input_offsets(dim_inputs); self._dim_groups, self._group_cache = contiguous_dim_groups(dim_inputs), {}; self.use_grouped_forward = True; self.to_features = ModuleList([nn.Sequential(RMSNorm(dim_in), nn.Linear(dim_in, dim)) for dim_in in dim_inputs])
+    def clear_runtime_cache(self): _clear_cache_dicts(self, "_group_cache")
     def _get_group_params(self, start, end, device, dtype):
         key = (start, end, device.type, device.index, dtype)
         use_cache = not self.training
@@ -66,6 +68,8 @@ class MaskEstimator(Module):
         # unsafe under DataParallel replica recycling (see _groupable_layers).
         dim_hidden = dim * mlp_expansion_factor
         self.to_freqs = ModuleList([ nn.Sequential(MLP(dim, dim_in * 2, dim_hidden=dim_hidden, depth=depth, hidden_layers=mlp_hidden_layers), nn.GLU(dim=-1)) for dim_in in dim_inputs ])
+    def clear_runtime_cache(self):
+        _clear_cache_dicts(self, "_group_cache", "_layer_group_cache", "_index_cache", "_packed_layer_group_cache")
     def _groupable_layers(self, mlp_with_glu):
         # NOTE: Do not cache by id(mlp_with_glu). Under torch.nn.DataParallel the
         # module is re-replicated on every forward, so band submodules are short

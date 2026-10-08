@@ -1,4 +1,5 @@
 import torch
+from pymss_core.runtime_cache import _clear_cache_dicts
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import Module, ModuleList
@@ -65,6 +66,7 @@ def rotate_qk_fast_bnhd(rotary_embed, q, k): cos, sin = cached_rotary_cos_sin(ro
 def qkv_to_bnhd(qkv, heads): b, n, _ = qkv.shape; return qkv.view(b, n, 3, heads, -1).unbind(dim=2)
 class RMSNorm(Module):
     def __init__(self, dim): super().__init__(); self.scale,self.gamma,self._gamma_dtype_cache = dim**0.5, nn.Parameter(torch.ones(dim)), {}
+    def clear_runtime_cache(self): _clear_cache_dicts(self, "_gamma_dtype_cache")
     def forward(self, x):
         if not self.training and x.dtype in (torch.float16, torch.bfloat16):
             key = (x.device.type, x.device.index, x.dtype, self.gamma.data_ptr(), self.gamma._version)
