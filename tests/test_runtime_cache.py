@@ -75,7 +75,6 @@ def test_cleanup_finishes_other_caches_before_reraising_a_hook_error():
     "_pymss_mlx_full_param_cache", "_pymss_mlx_cos_sin_cache", "_pymss_mlx_attention_cache",
     "_pymss_mlx_feed_forward_cache", "_pymss_mlx_norm_cache", "_pymss_mlx_full_band_split_cache",
     "_pymss_mlx_full_mask_cache", "_pymss_mlx_full_mbr_cache",
-    "_pymss_mlx_compiled_attention_cache", "_pymss_mlx_compiled_feed_forward_cache",
 ])
 @pytest.mark.parametrize("hook_failure", [False, True])
 def test_cleanup_releases_mlx_cache_references_even_when_a_hook_fails(cache_name, hook_failure):

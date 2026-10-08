@@ -8,13 +8,18 @@ def _clear_cache_dicts(module, *names):
 
 
 def clear_model_runtime_caches(model):
-    """Release known inference caches and module-owned hooks without changing weights."""
+    """Release model-owned inference caches without changing parameters or buffers.
+
+    Module cleanup hooks run once per unique module. If a hook fails, cleanup
+    continues through the remaining modules before the first error is re-raised.
+    Process-wide shared caches and backend allocator caches are managed
+    separately from this model-level cleanup.
+    """
     cache_names = (
         "_pymss_cos_sin_cache", "_pymss_apollo_inference_cache",
         "_pymss_mlx_full_param_cache", "_pymss_mlx_cos_sin_cache", "_pymss_mlx_attention_cache",
         "_pymss_mlx_feed_forward_cache", "_pymss_mlx_norm_cache", "_pymss_mlx_full_band_split_cache",
         "_pymss_mlx_full_mask_cache", "_pymss_mlx_full_mbr_cache",
-        "_pymss_mlx_compiled_attention_cache", "_pymss_mlx_compiled_feed_forward_cache",
     )
     first_error = None
     for module in model.modules():
