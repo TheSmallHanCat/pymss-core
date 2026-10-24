@@ -128,9 +128,40 @@ def _feed_forward_cache(module, dtype):
 def _mlx_feed_forward(module, x, dtype):
     import mlx.core as mx
     cache = _feed_forward_cache(module, dtype)
+    if not getattr(module, "_pymss_mlx_disable_compiled_ffn", False):
+        compiled_cache = getattr(module, "_pymss_mlx_compiled_feed_forward_cache", None)
+        if compiled_cache is None: module._pymss_mlx_compiled_feed_forward_cache = compiled_cache = {}
+        key = (tuple(x.shape), x.dtype, cache["key"])
+        if compiled_cache.get("key") != key:
+            # One graph or failure record; new shapes/weights may compile successfully.
+            compiled_cache.clear()
+            compiled_cache["key"] = key
+        if "error" not in compiled_cache:
+            try:
+                return _mlx_feed_forward_compiled(x, cache, compiled_cache)
+            except Exception as exc:
+                # Do not retain a failed graph or permanently disable other cache keys.
+                compiled_cache.clear()
+                compiled_cache.update(key=key, error=repr(exc))
+    # Keep the bounded eager path for unsupported compiler/backend operations.
     y = _rms_norm(x, cache["norm_gamma"]); mx.eval(y)
     y = _gelu(_linear(y, cache["linear_in_weight"], cache["linear_in_bias"])); mx.eval(y)
     out = _linear(y, cache["linear_out_weight"], cache["linear_out_bias"]); mx.eval(out)
+    return out
+def _mlx_feed_forward_compiled(x, cache, compiled_cache):
+    import mlx.core as mx
+    has_in_bias, has_out_bias = cache["linear_in_bias"] is not None, cache["linear_out_bias"] is not None
+    if "fn" not in compiled_cache:
+        def ffn_core(x_arg, gamma, weight_in, bias_in, weight_out, bias_out):
+            y = _gelu(_linear(_rms_norm(x_arg, gamma), weight_in, bias_in if has_in_bias else None))
+            return _linear(y, weight_out, bias_out if has_out_bias else None)
+        compiled_cache["fn"] = mx.compile(ffn_core)
+    dummy = mx.zeros((0,), dtype=x.dtype)
+    out = compiled_cache["fn"](x, cache["norm_gamma"], cache["linear_in_weight"], cache["linear_in_bias"] if has_in_bias else dummy,
+                               cache["linear_out_weight"], cache["linear_out_bias"] if has_out_bias else dummy)
+    if out.shape != x.shape: raise ValueError(f"compiled FFN returned shape {out.shape}, expected {x.shape}")
+    # Materialize here so FFN intermediates die before the next attention stage.
+    mx.eval(out)
     return out
 def _norm_gamma_cache(module, dtype):
     if isinstance(module, torch.nn.Identity): return None
