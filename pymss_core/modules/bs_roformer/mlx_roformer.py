@@ -1,5 +1,5 @@
 import torch
-from ..mlx_backend import (conv1d, conv2d, glu, instance_norm2d, linear, maybe_eval, overlap_add, param, periodic_hann_window, reflect_pad_last, silu, to_mx, to_torch)
+from ..mlx_backend import (_cache_limit, conv1d, conv2d, glu, instance_norm2d, linear, maybe_eval, overlap_add, param, periodic_hann_window, reflect_pad_last, silu, to_mx, to_torch)
 from . import hyperace_segm
 from .bands import contiguous_dim_groups
 from .bs_roformer_hyperace import BSRoformerHyperACE
@@ -203,14 +203,12 @@ def _hyperace(module, features, dtype):
     return out
 def _gated_fusion(module, f_in, h, dtype): return f_in + param(module, "gamma", module.gamma, dtype) * h
 def _backbone(module, x, dtype):
-    import mlx.core as mx
     x2 = _seq(module.p2, _dsconv_block(module.stem, x, dtype), dtype); segm_eval(x2)
     x3 = _seq(module.p3, x2, dtype); segm_eval(x3)
     x4 = _seq(module.p4, x3, dtype); segm_eval(x4)
     x5 = _seq(module.p5, x4, dtype); segm_eval(x5)
     return [x2, x3, x4, x5]
 def _decoder(module, enc_feats, h_ace, dtype):
-    import mlx.core as mx
     p2, p3, p4, p5 = enc_feats
     d5 = _gated_fusion(module.fusion_d5, _conv_block(module.skip_p5, p5, dtype), _conv_block(module.h_to_d5, _resize_bilinear_nchw(h_ace, p5.shape[2:]), dtype), dtype); segm_eval(d5)
     d4 = _ds_c3k2(module.up_d5, _resize_bilinear_nchw(d5, p4.shape[2:]), dtype) + _conv_block(module.skip_p4, p4, dtype)
@@ -226,7 +224,6 @@ def _tfc_tdf(module, x, dtype):
     return x
 def _freq_pixel_shuffle(module, x, dtype): x = _dsconv_block(module.conv, x, dtype); b, c_r, h, w = x.shape; out_c = c_r // module.scale; x = x.reshape(b, out_c, module.scale, h, w).transpose(0, 1, 3, 4, 2).reshape(b, out_c, h, w * module.scale); return _tfc_tdf(module.out_conv, x, dtype)
 def _progressive_upsample_head(module, x, dtype):
-    import mlx.core as mx
     x = _freq_pixel_shuffle(module.block1, x, dtype); segm_eval(x)
     x = _freq_pixel_shuffle(module.block2, x, dtype); segm_eval(x)
     x = _freq_pixel_shuffle(module.block3, x, dtype); segm_eval(x)
@@ -299,6 +296,7 @@ def mlx_forward_roformer_mx(module, raw_audio, dtype=_COMPUTE_DTYPE):
     if getattr(module, "use_pope", False): raise NotImplementedError("PoPE models require the PyTorch backend")
     if dtype not in (torch.float16, torch.float32): raise TypeError("MLX full RoFormer supports torch.float16 or torch.float32 compute dtype")
     import mlx.core as mx
+    _cache_limit()  # Bound allocator reuse before even the first warmup/STFT stage.
     mx_dtype = mx.float16 if dtype == torch.float16 else mx.float32
     stft_repr, context = _stft_roformer(module, raw_audio.astype(mx_dtype), mx_dtype)
     mx.eval(stft_repr)

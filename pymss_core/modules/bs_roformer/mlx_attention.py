@@ -101,18 +101,22 @@ def _mlx_attention(module, x, dtype):
     import mlx.core as mx
     dtype = _mlx_dtype(torch_dtype(dtype))
     cache = _attention_cache(module, dtype)
-    # step-wise eval: each sub-step's workspace, not the whole layer's
-    x_norm = _rms_norm(x, cache["norm_gamma"]); mx.eval(x_norm)
-    qkv = _linear(x_norm, cache["qkv_weight"], cache["qkv_bias"]); mx.eval(qkv)
+    # Q/K/V evaluation also materializes normalization and projection. Keep the
+    # three stage boundaries without synchronizing those dependencies separately.
+    x_norm = _rms_norm(x, cache["norm_gamma"])
+    qkv = _linear(x_norm, cache["qkv_weight"], cache["qkv_bias"])
     b, n, _ = qkv.shape
     qkv = qkv.reshape(b, n, 3, module.heads, -1)
     q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
     if module.rotary_embed is not None: q, k = _apply_rotary(q, k, module.rotary_embed, dtype)
     q, k, v = mx.swapaxes(q, 1, 2), mx.swapaxes(k, 1, 2), mx.swapaxes(v, 1, 2); mx.eval(q, k, v)
     out = _sdpa_chunked(q, k, v, scale=q.shape[-1] ** -0.5); mx.eval(out)
+    del q, k, v, qkv
     out = mx.swapaxes(out, 1, 2)
     gates = _sigmoid(_linear(x_norm, cache["gate_weight"], cache["gate_bias"]))
-    out = _linear((out * gates[..., None]).reshape(b, n, -1), cache["out_weight"], cache["out_bias"]); mx.eval(out)
+    out = _linear((out * gates[..., None]).reshape(b, n, -1), cache["out_weight"], cache["out_bias"])
+    del x_norm, gates
+    mx.eval(out)
     return out
 def mlx_bridge_attention(module, x): x_mx = torch_mps_to_mlx(x).astype(_mlx_dtype(_COMPUTE_DTYPE)); out = _mlx_attention(module, x_mx, _COMPUTE_DTYPE); return mlx_to_torch_mps(out, x)
 def _feed_forward_cache(module, dtype):

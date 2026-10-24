@@ -31,7 +31,12 @@ def param(module, name, tensor, dtype, transpose=None):  # memoize converted wei
     if transpose is not None: value = value.transpose(transpose)
     cache[cache_key] = (key, value)
     return value
-def linear(x, weight, bias=None): import mlx.core as mx; y = mx.matmul(x, mx.swapaxes(weight, -1, -2)); return y if bias is None else y + bias
+def linear(x, weight, bias=None):
+    import mlx.core as mx
+    transposed = mx.swapaxes(weight, -1, -2)
+    # Match mlx.nn.Linear: fuse the bias into GEMM instead of retaining a full
+    # projection temporary for a separate addition.
+    return mx.matmul(x, transposed) if bias is None else mx.addmm(bias, x, transposed)
 def linear_layer(module, x, dtype): return linear(x, param(module, "weight", module.weight, dtype), None if module.bias is None else param(module, "bias", module.bias, dtype))
 def generic_activation(module, x, extra_swish=False):
     # shared activation dispatch: Tanh/ReLU/GELU/ELU/Identity/Swish, ordered by per-family frequency
@@ -90,7 +95,8 @@ def _cache_limit():  # allocator cache is a monotonic ledger of dead-but-cached 
     if _CACHE_LIMIT_DONE: return
     _CACHE_LIMIT_DONE = True
     try:
-        import os, mlx.core as mx
+        import os
+        import mlx.core as mx
         if (mb := int(os.environ.get("PYMSS_MLX_CACHE_LIMIT_MB", "1024"))) >= 0: mx.metal.set_cache_limit(mb * 1024 * 1024)
     except Exception: pass
 def maybe_eval(*arrays):  # rolling eval: free each stage before the next builds; no-op when mlx is unavailable (cross-platform unit tests mock the forward path)
