@@ -34,3 +34,18 @@ def test_attention_matches_torch_with_rotary_gates_and_query_tail(mx, dtype, len
     actual = _mlx_attention(module, x, dtype)
     tolerance = 3e-3 if dtype == torch.float16 else 2e-5
     np.testing.assert_allclose(np.array(actual), expected, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("rotary", [False, True])
+def test_attention_normalizes_wide_residual_before_half_projection(mx, dtype, rotary):
+    torch.manual_seed(31)
+    module = Attention(16, heads=2, dim_head=8,
+                       rotary_embed=RotaryEmbedding(dim=8) if rotary else None).eval()
+    audio = torch.randn(2, 31, 16) * 1e6
+    with torch.inference_mode(): expected = module(audio).numpy()
+    actual = _mlx_attention(module, mx.array(audio.numpy()), dtype)
+    mx.eval(actual)
+    assert actual.dtype == (mx.float16 if dtype == torch.float16 else mx.float32)
+    assert bool(mx.all(mx.isfinite(actual)).item())
+    np.testing.assert_allclose(np.array(actual), expected, atol=3e-3 if dtype == torch.float16 else 2e-5, rtol=3e-3)

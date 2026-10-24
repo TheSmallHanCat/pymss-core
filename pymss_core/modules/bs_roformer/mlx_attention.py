@@ -104,6 +104,7 @@ def _mlx_attention(module, x, dtype):
     # Q/K/V evaluation also materializes normalization and projection. Keep the
     # three stage boundaries without synchronizing those dependencies separately.
     x_norm = _rms_norm(x, cache["norm_gamma"])
+    if x_norm.dtype != dtype: x_norm = x_norm.astype(dtype)
     qkv = _linear(x_norm, cache["qkv_weight"], cache["qkv_bias"])
     b, n, _ = qkv.shape
     qkv = qkv.reshape(b, n, 3, module.heads, -1)
@@ -148,7 +149,9 @@ def _mlx_feed_forward(module, x, dtype):
                 compiled_cache.clear()
                 compiled_cache.update(key=key, error=repr(exc))
     # Keep the bounded eager path for unsupported compiler/backend operations.
-    y = _rms_norm(x, cache["norm_gamma"]); mx.eval(y)
+    y = _rms_norm(x, cache["norm_gamma"])
+    if y.dtype != cache["norm_gamma"].dtype: y = y.astype(cache["norm_gamma"].dtype)
+    mx.eval(y)
     y = _gelu(_linear(y, cache["linear_in_weight"], cache["linear_in_bias"])); mx.eval(y)
     out = _linear(y, cache["linear_out_weight"], cache["linear_out_bias"]); mx.eval(out)
     return out
@@ -157,7 +160,9 @@ def _mlx_feed_forward_compiled(x, cache, compiled_cache):
     has_in_bias, has_out_bias = cache["linear_in_bias"] is not None, cache["linear_out_bias"] is not None
     if "fn" not in compiled_cache:
         def ffn_core(x_arg, gamma, weight_in, bias_in, weight_out, bias_out):
-            y = _gelu(_linear(_rms_norm(x_arg, gamma), weight_in, bias_in if has_in_bias else None))
+            y = _rms_norm(x_arg, gamma)
+            if y.dtype != gamma.dtype: y = y.astype(gamma.dtype)
+            y = _gelu(_linear(y, weight_in, bias_in if has_in_bias else None))
             return _linear(y, weight_out, bias_out if has_out_bias else None)
         compiled_cache["fn"] = mx.compile(ffn_core)
     dummy = mx.zeros((0,), dtype=x.dtype)

@@ -188,3 +188,23 @@ def test_shape_changes_and_cleanup_release_compiled_callables(mx, monkeypatch):
     clear_model_runtime_caches(module)
     gc.collect()
     assert all(ref() is None for ref in references)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("eager", [False, True])
+@pytest.mark.parametrize("bias", [False, True])
+def test_wide_residual_is_normalized_before_casting_to_compute_dtype(mx, dtype, eager, bias):
+    torch.manual_seed(29)
+    module = FeedForward(8, mult=2).eval()
+    module._pymss_mlx_disable_compiled_ffn = eager
+    if not bias:
+        module.net[1].bias = module.net[4].bias = None
+    audio = torch.randn(2, 7, 8) * 1e6
+    expected = module(audio).detach().numpy()
+    actual = mlx_attention._mlx_feed_forward(module, mx.array(audio.numpy()), dtype)
+    mx.eval(actual)
+    assert actual.dtype == (mx.float16 if dtype == torch.float16 else mx.float32)
+    assert bool(mx.all(mx.isfinite(actual)).item())
+    np.testing.assert_allclose(np.array(actual), expected, atol=3e-3 if dtype == torch.float16 else 2e-6, rtol=3e-3)
+    if not eager:
+        assert "fn" in module._pymss_mlx_compiled_feed_forward_cache

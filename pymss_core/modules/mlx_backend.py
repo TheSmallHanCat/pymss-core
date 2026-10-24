@@ -69,7 +69,19 @@ def generic_module_forward(module, x, dtype, norm_fn, swish_cls=None, extra=()):
     if isinstance(module, torch.nn.SiLU): return silu(x)
     if swish_cls is not None and isinstance(module, swish_cls): return swish(x)
     return generic_activation(module, x)
-def rms_norm(x, gamma): import mlx.core as mx; return x * mx.rsqrt(mx.mean(mx.square(x), axis=-1, keepdims=True) + 1e-12) * gamma
+def rms_norm(x, gamma):
+    import mlx.core as mx
+    if x.dtype == mx.float16:
+        # Promote before squaring even when gamma is FP32: multiplying by a
+        # wider weight later cannot repair an FP16 underflow/overflow.
+        if getattr(gamma, "dtype", None) == mx.float16 and gamma.ndim == 1 and gamma.shape[0] == x.shape[-1]:
+            return mx.fast.rms_norm(x, gamma, eps=1e-12)
+        promoted = x.astype(mx.float32)
+        normalized = promoted * mx.rsqrt(mx.mean(mx.square(promoted), axis=-1, keepdims=True) + 1e-12)
+        # Read native promotion from a lazy expression; do not narrow FP32 gamma.
+        out, output_dtype = normalized * gamma, (x * gamma).dtype
+        return out if out.dtype == output_dtype else out.astype(output_dtype)
+    return x * mx.rsqrt(mx.mean(mx.square(x), axis=-1, keepdims=True) + 1e-12) * gamma
 def sigmoid(x): import mlx.core as mx; return mx.sigmoid(x)
 def gelu(x): import mlx.core as mx; return 0.5 * x * (1 + mx.erf(x * (2**-0.5)))
 def relu(x): import mlx.core as mx; return mx.maximum(x, 0)
